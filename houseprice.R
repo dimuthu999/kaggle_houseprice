@@ -4,6 +4,7 @@ require(dplyr)
 require(dummies)
 library(tidyr)
 require(pander)
+require(randomForest)
 setwd("E:/Kaggle/House Prices")
 
 library(dplyr) # for data cleaning
@@ -12,71 +13,159 @@ library(cluster) # for gower similarity and pam
 library(Rtsne) # for t-SNE plot
 library(ggplot2) # for visualization
 
+no_of_pcoms <- 25
 
-train_data <- read.csv(url("https://github.com/dimuthu999/kaggle_houseprice/raw/master/train.csv"))
-toFactor <- c("MSSubClass",'OverallQual','OverallCond')
-for(f in toFactor)  {
-  eval(parse(text=paste("train_data$",f,"<-as.factor(train_data$",f,")",sep="")))
+get_factor_variables <- function(col_names,class){
+  groups <- as.data.frame(cbind(col_names,class))
+  names(groups)<-c("col_name","class")
+  rownames(groups)<-NULL
+  return(as.vector(groups[groups$class=="factor",]$col_name))
+}
+as.numeric.factor <- function(x) {as.numeric(levels(x))[x]}
+RMSLE <- function(a, p) {
+  s <- 0
+  n <- 0
+  x <- !is.na(a)
+  n <- n + sum(x)
+  s <- s + sum((log1p(p[x]) - log1p(a[x]))^2)
+  return (sqrt(s/n))
 }
 
-org_train_data <- train_data
+load_data <- function() {
+  
+  for(fname in c("train","test")) {
+    data <- read.csv(paste(fname,".csv",sep = ""))
+    
+    for(col_name in names(data))  {
+      cat(col_name,"\n")
+      eval(parse(text=paste("data$",col_name,"[is.na(data$",col_name,")]<-median(as.numeric(data$",col_name,"), na.rm = TRUE)",sep="")))
+    }
+    
+    toFactor <- c("MSSubClass",'OverallQual','OverallCond')
+    for(f in toFactor)  {
+      eval(parse(text=paste("data$",f,"<-as.factor(data$",f,")",sep="")))
+    }
+    
+    if(fname=="train")  {
+      org_train_data <<- data
+    }
+    
+    factor_variables <- get_factor_variables(names(data),sapply(data,class))
+    data <- dummy.data.frame(data, names = factor_variables)
+    
+    names(data) <- gsub('([[:punct:]])|\\s+','_',names(data))
+    
+    eval(parse(text=paste(fname,"_data<-data",sep="")))
+  }
+  
+  drop_test <- names(test_data)[!names(test_data) %in% names(train_data)]
+  drop_train <- names(train_data)[!names(train_data) %in% names(test_data)]
+  
+  drop_train <- drop_train[!drop_train %in% "SalePrice"]
+  train_data <- train_data[,!names(train_data) %in% drop_train]
+  test_data <- test_data[,!names(test_data) %in% drop_test]
+  
+  
+  prin_comp <- prcomp(train_data[,!colnames(train_data) %in% c("Id","SalePrice")], scale. = T)
+  plot(prin_comp$sdev) #=> 20 PCs are good
+  pc_weights <- as.data.frame(prin_comp$rotation[,1:no_of_pcoms])
 
-# 1-type; 2-area; 3-size; 4-ammenities; 5-quality; 6-sale time; 7-sale-type
-groups <- c(0,1,2,3,3,1,1,1,1,4,1,1,2,2,2,1,1,5,5,5,5,1,1,1,1,1,3,5,5,1,1,5,1,5,3,5,3,3,3,4,5,4,5,3,3,5,3,4,4,4,4,4,4,5,3,5,4,5,4,5,5,4,3,5,5,5,5,5,3,3,3,5,5,5,5,5,6,6,7,7,0)
-groups <- as.data.frame(cbind(names(train_data),groups,sapply(train_data,class)))
-names(groups)<-c("col_name","group","class")
-rownames(groups)<-NULL
-groups<-groups[ order(groups$group,groups$class), ]
+  
+  train_data <- cbind(train_data[,colnames(train_data) %in% c("Id","SalePrice")],as.data.frame(as.matrix(train_data[,!colnames(train_data) %in% c("Id","SalePrice")]) %*% as.matrix(pc_weights)))
+  
+  set.seed(20)
+  train_data_cluster <- kmeans(train_data[, 3:(no_of_pcoms+2)], 5, nstart = 20)
+  train_data <- cbind(train_data,as.vector(train_data_cluster$cluster))
+  names(train_data)[length(names(train_data))]<- "cluster"
+  
+  all_train_data <- train_data
+  train_data <- sample_frac(all_train_data,0.7)
+  sid <- unique(train_data$Id)
 
-
-train_data <- train_data[,as.vector(groups$col_name)]
-table(groups$group,groups$class)
-
-factor_variables <- as.vector(groups[groups$class=="factor",]$col_name)
-train_data <- dummy.data.frame(train_data, names = factor_variables)
-
-names(train_data) <- gsub('([[:punct:]])|\\s+','_',names(train_data))
-
-for(col_name in names(train_data))  {
-  cat(col_name,"\n")
-  eval(parse(text=paste("train_data$",col_name,"[is.na(train_data$",col_name,")]<-median(train_data$",col_name,", na.rm = TRUE)",sep="")))
+  train_data <<-train_data
+  cv_data <<- all_train_data[! (all_train_data$Id %in% sid),]
+  test_data <<- cbind(test_data[,colnames(test_data) %in% c("Id","SalePrice")],as.data.frame(as.matrix(test_data[,!colnames(test_data) %in% c("Id","SalePrice")]) %*% as.matrix(pc_weights)))
 }
 
-prin_comp <- prcomp(train_data[,!colnames(train_data) %in% c("Id","SalePrice")], scale. = T)
-plot(prin_comp$sdev) #=> 20 PCs are good
-no_of_pcoms <- 50
-pc_weights <- as.data.frame(prin_comp$rotation[,1:no_of_pcoms])
 
-train_data <- cbind(train_data[,colnames(train_data) %in% c("Id","SalePrice")],as.data.frame(as.matrix(train_data[,!colnames(train_data) %in% c("Id","SalePrice")]) %*% as.matrix(pc_weights)))
+load_data()
+table(train_data$cluster)
+clusters <- c(1,4,5) # major clusters
 
+# cluster prediction
+cluster_train_data <- train_data[train_data$cluster %in% clusters,]
+cluster_rf_fromula <- as.formula(paste('as.factor(cluster) ~ ' ,paste(names(train_data)[3:(no_of_pcoms+2)],collapse = "+")))
+cluster_rf <- randomForest(cluster_rf_fromula,cluster_train_data)
+cluster_rf_prediction <- predict(cluster_rf,cv_data[,names(cluster_train_data)[3:(no_of_pcoms+2)]])
+cv_data["predicted_cluster"] <- cluster_rf_prediction
+cv_data$predicted_cluster <- as.integer(as.character(cv_data$predicted_cluster))
+confusion <- as.data.frame(table(cv_data$cluster,cv_data$predicted_cluster))
+confusion$Var1 <- as.numeric.factor(confusion$Var1)
+confusion$Var2 <- as.numeric.factor(confusion$Var2)
+acc <- sum(confusion[confusion$Var1==confusion$Var2,'Freq'])/sum(confusion$Freq)
+cat("Clustering Prediction Accuracy : ",acc,"\n")
 
-set.seed(20)
-train_data_cluster <- kmeans(train_data[, 3:(no_of_pcoms+2)], 5, nstart = 20)
-train_data <- cbind(train_data,as.vector(train_data_cluster$cluster))
-org_train_data <- cbind(org_train_data,as.vector(train_data_cluster$cluster))
-names(train_data)[length(names(train_data))]<- "cluster"
-names(org_train_data)[length(names(org_train_data))]<- "cluster_kmean"
-
-for(cluster in c(1,4,5))  {
+# ols for each cluster
+ols<-list()
+for(cluster in clusters)  {
   lm_formula <- as.formula(paste("SalePrice~",paste(names(train_data)[3:(no_of_pcoms+2)],collapse = "+"),sep = ""))
-  ols <- summary(lm(lm_formula,data=train_data[train_data$cluster==cluster,]))
-  cat("Cluster ",cluster,"Adj. R sq  -",ols$adj.r.squared,"\n")
+  ols[[cluster]] <- (lm(lm_formula,data=train_data[train_data$cluster==cluster,]))
+  summary(ols[[cluster]])
+  cat("Cluster ",cluster,"Adj. R sq  -",summary(ols[[cluster]])$adj.r.squared,"\n")
 }
 
-lm_formula <- as.formula(paste("SalePrice~",paste(names(train_data)[3:(no_of_pcoms+2)],collapse = "+"),sep = ""))
-ols <- summary(lm(lm_formula,data=train_data))
-cat("Combined Regression Adj. R sq ",ols$adj.r.squared,"\n")
+lm_formula <- as.formula(paste("SalePrice~",paste(c(names(train_data)[3:(no_of_pcoms+2)],'cluster'),collapse = "+"),sep = ""))
+ols[['all']] <- (lm(lm_formula,data=train_data))
+cat("Combined Regression Adj. R sq ",summary(ols[['all']])$adj.r.squared,"\n")
 
 
-org_train_data <- org_train_data[org_train_data$cluster_kmean %in% c(1,4,5),]
-cluster_summary <- org_train_data %>%
-  #na.omit() %>%
-  dplyr::select(SalePrice,BedroomAbvGr) %>%
-  mutate(cluster = org_train_data$cluster_kmean) %>%
-  group_by(cluster) %>%
-  do(the_summary = summary(.,na.rm = TRUE))
-cluster_summary$the_summary
+# random forest for each cluster
+rf<-list()
+for(cluster in clusters)  {
+  lm_formula <- as.formula(paste("SalePrice~",paste(names(train_data)[3:(no_of_pcoms+2)],collapse = "+"),sep = ""))
+  rf[[cluster]] <- (randomForest(lm_formula,data=train_data[train_data$cluster==cluster,],ntree=5000))
+}
 
+# cross validation sample prediction
+cv_predict <- NULL
+for(cluster in clusters)  {
+  temp <- as.data.frame(predict(ols[[cluster]],cv_data[cv_data$predicted_cluster==cluster,]))
+  temp <- as.data.frame(cbind(cv_data[cv_data$predicted_cluster==cluster,]$Id,cv_data[cv_data$predicted_cluster==cluster,]$SalePrice,temp))
+  names(temp) <- c("Id","A","P")
+  cv_predict <- rbind(cv_predict,temp)
+}
+cv_predict$P[cv_predict$P<0] <- quantile(cv_predict$P,0.01)
+plot(cv_predict$A,cv_predict$P)
+cat("RMSLE CV: ",RMSLE(cv_predict$A,cv_predict$P))
+
+
+# test sample prediction
+test_predict <- NULL
+
+cluster_rf_prediction <- predict(cluster_rf,test_data[,names(train_data)[3:(no_of_pcoms+2)]])
+test_data["predicted_cluster"] <- cluster_rf_prediction
+test_data$predicted_cluster <- as.integer(as.character(test_data$predicted_cluster))
+
+for(cluster in clusters)  {
+  temp <- as.data.frame(predict(ols[[cluster]],test_data[test_data$predicted_cluster==cluster,]))
+  temp <- as.data.frame(cbind(test_data[test_data$predicted_cluster==cluster,]$`test_data[, colnames(test_data) %in% c("Id", "SalePrice")]`,temp))
+  test_predict <- rbind(test_predict,temp)
+}
+names(test_predict) <- c("Id","SalePrice")
+
+
+
+write.csv(test_predict,file="test_predict.csv",quote = FALSE,row.names = FALSE)
+
+
+
+
+
+# DESCRIPTIVES ------------------------------------------------------------
+
+
+# org_train_data <- cbind(org_train_data,as.vector(train_data_cluster$cluster))
+# names(org_train_data)[length(names(org_train_data))]<- "cluster_kmean"
 
 cluster_summary <- org_train_data %>%
   select(SalePrice,BedroomAbvGr,LotArea,LotFrontage) %>%  # Remove the subject column
@@ -89,36 +178,6 @@ cluster_summary <- org_train_data %>%
   select(group, variable, mean, sd)
 pandoc.table(cluster_summary)
 
-
-
-test_data <- read.csv("test.csv")
-toFactor <- c("MSSubClass",'OverallQual','OverallCond')
-for(f in toFactor)  {
-  eval(parse(text=paste("test_data$",f,"<-as.factor(test_data$",f,")",sep="")))
-}
-
-org_train_data <- train_data
-
-# 1-type; 2-area; 3-size; 4-ammenities; 5-quality; 6-sale time; 7-sale-type
-groups <- c(0,1,2,3,3,1,1,1,1,4,1,1,2,2,2,1,1,5,5,5,5,1,1,1,1,1,3,5,5,1,1,5,1,5,3,5,3,3,3,4,5,4,5,3,3,5,3,4,4,4,4,4,4,5,3,5,4,5,4,5,5,4,3,5,5,5,5,5,3,3,3,5,5,5,5,5,6,6,7,7)
-groups <- as.data.frame(cbind(names(test_data),groups,sapply(test_data,class)))
-names(groups)<-c("col_name","group","class")
-rownames(groups)<-NULL
-groups<-groups[ order(groups$group,groups$class), ]
-
-
-test_data <- test_data[,as.vector(groups$col_name)]
-table(groups$group,groups$class)
-
-factor_variables <- as.vector(groups[groups$class=="factor",]$col_name)
-test_data <- dummy.data.frame(test_data, names = factor_variables)
-
-names(test_data) <- gsub('([[:punct:]])|\\s+','_',names(test_data))
-
-for(col_name in names(test_data))  {
-  cat(col_name,"\n")
-  eval(parse(text=paste("test_data$",col_name,"[is.na(test_data$",col_name,")]<-median(test_data$",col_name,", na.rm = TRUE)",sep="")))
-}
 # Cluster Trial -----------------------------------------------------------
 # FROM : https://www.r-bloggers.com/clustering-mixed-data-types-in-r/
 
