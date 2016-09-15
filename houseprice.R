@@ -2,6 +2,8 @@ rm(list=ls())
 require(FactoMineR)
 require(dplyr)
 require(dummies)
+library(tidyr)
+require(pander)
 setwd("E:/Kaggle/House Prices")
 
 library(dplyr) # for data cleaning
@@ -17,6 +19,7 @@ for(f in toFactor)  {
   eval(parse(text=paste("train_data$",f,"<-as.factor(train_data$",f,")",sep="")))
 }
 
+org_train_data <- train_data
 
 # 1-type; 2-area; 3-size; 4-ammenities; 5-quality; 6-sale time; 7-sale-type
 groups <- c(0,1,2,3,3,1,1,1,1,4,1,1,2,2,2,1,1,5,5,5,5,1,1,1,1,1,3,5,5,1,1,5,1,5,3,5,3,3,3,4,5,4,5,3,3,5,3,4,4,4,4,4,4,5,3,5,4,5,4,5,5,4,3,5,5,5,5,5,3,3,3,5,5,5,5,5,6,6,7,7,0)
@@ -41,66 +44,81 @@ for(col_name in names(train_data))  {
 
 prin_comp <- prcomp(train_data[,!colnames(train_data) %in% c("Id","SalePrice")], scale. = T)
 plot(prin_comp$sdev) #=> 20 PCs are good
-pc_weights <- as.data.frame(prin_comp$rotation[,1:20])
+no_of_pcoms <- 50
+pc_weights <- as.data.frame(prin_comp$rotation[,1:no_of_pcoms])
 
 train_data <- cbind(train_data[,colnames(train_data) %in% c("Id","SalePrice")],as.data.frame(as.matrix(train_data[,!colnames(train_data) %in% c("Id","SalePrice")]) %*% as.matrix(pc_weights)))
 
-lm_formula <- as.formula(paste("SalePrice~",paste(names(train_data)[3:22],collapse = "+"),sep = ""))
-summary(lm(lm_formula,data=train_data))
 
+set.seed(20)
+train_data_cluster <- kmeans(train_data[, 3:(no_of_pcoms+2)], 5, nstart = 20)
+train_data <- cbind(train_data,as.vector(train_data_cluster$cluster))
+org_train_data <- cbind(org_train_data,as.vector(train_data_cluster$cluster))
+names(train_data)[length(names(train_data))]<- "cluster"
+names(org_train_data)[length(names(org_train_data))]<- "cluster_kmean"
 
-
-
-
-
-
-glimpse(train)
-
-gower_dist <- daisy(train[, !names(train) %in% c('SalesPrice','Id')],
-                    metric = "gower",
-                    type = list(logratio = 3))
-
-summary(gower_dist)
-gower_mat <- as.matrix(gower_dist)
-
-
-sil_width <- c(NA)
-
-for(i in 2:10){
-  
-  pam_fit <- pam(gower_dist,
-                 diss = TRUE,
-                 k = i)
-  
-  sil_width[i] <- pam_fit$silinfo$avg.width
-  
+for(cluster in c(1,4,5))  {
+  lm_formula <- as.formula(paste("SalePrice~",paste(names(train_data)[3:(no_of_pcoms+2)],collapse = "+"),sep = ""))
+  ols <- summary(lm(lm_formula,data=train_data[train_data$cluster==cluster,]))
+  cat("Cluster ",cluster,"Adj. R sq  -",ols$adj.r.squared,"\n")
 }
 
+lm_formula <- as.formula(paste("SalePrice~",paste(names(train_data)[3:(no_of_pcoms+2)],collapse = "+"),sep = ""))
+ols <- summary(lm(lm_formula,data=train_data))
+cat("Combined Regression Adj. R sq ",ols$adj.r.squared,"\n")
 
-plot(1:10, sil_width,
-     xlab = "Number of clusters",
-     ylab = "Silhouette Width")
-lines(1:10, sil_width)
 
-pam_fit <- pam(gower_dist, diss = TRUE, k = 2)
-
-pam_results <- train %>%
-  dplyr::select(-Id) %>%
-  mutate(cluster = pam_fit$clustering) %>%
+org_train_data <- org_train_data[org_train_data$cluster_kmean %in% c(1,4,5),]
+cluster_summary <- org_train_data %>%
+  #na.omit() %>%
+  dplyr::select(SalePrice,BedroomAbvGr) %>%
+  mutate(cluster = org_train_data$cluster_kmean) %>%
   group_by(cluster) %>%
-  do(the_summary = summary(.))
+  do(the_summary = summary(.,na.rm = TRUE))
+cluster_summary$the_summary
 
 
-pam_results <- train %>%
-  dplyr::select(SalePrice,BsmtFinSF1,TotalBsmtSF,FullBath,TotRmsAbvGrd) %>%
-  mutate(cluster = pam_fit$clustering) %>%
-  group_by(cluster) %>%
-  do(the_summary = summary(.),the_mean = mean(.,na.rm=TRUE))
+cluster_summary <- org_train_data %>%
+  select(SalePrice,BedroomAbvGr,LotArea,LotFrontage) %>%  # Remove the subject column
+  mutate(group = org_train_data$cluster_kmean) %>%
+  group_by(group) %>%
+  summarise_each(funs(mean(., na.rm = TRUE),sd(., na.rm = TRUE))) %>%  # Calculate summary statistics for each group
+  gather(variable, value, -group) %>%  # Convert to long
+  separate(variable, c("variable", "statistic")) %>%  # Split variable column
+  spread(statistic, value) %>%  # Make the statistics be actual columns
+  select(group, variable, mean, sd)
+pandoc.table(cluster_summary)
 
-pam_results$the_summary
 
 
+test_data <- read.csv("test.csv")
+toFactor <- c("MSSubClass",'OverallQual','OverallCond')
+for(f in toFactor)  {
+  eval(parse(text=paste("test_data$",f,"<-as.factor(test_data$",f,")",sep="")))
+}
 
+org_train_data <- train_data
+
+# 1-type; 2-area; 3-size; 4-ammenities; 5-quality; 6-sale time; 7-sale-type
+groups <- c(0,1,2,3,3,1,1,1,1,4,1,1,2,2,2,1,1,5,5,5,5,1,1,1,1,1,3,5,5,1,1,5,1,5,3,5,3,3,3,4,5,4,5,3,3,5,3,4,4,4,4,4,4,5,3,5,4,5,4,5,5,4,3,5,5,5,5,5,3,3,3,5,5,5,5,5,6,6,7,7)
+groups <- as.data.frame(cbind(names(test_data),groups,sapply(test_data,class)))
+names(groups)<-c("col_name","group","class")
+rownames(groups)<-NULL
+groups<-groups[ order(groups$group,groups$class), ]
+
+
+test_data <- test_data[,as.vector(groups$col_name)]
+table(groups$group,groups$class)
+
+factor_variables <- as.vector(groups[groups$class=="factor",]$col_name)
+test_data <- dummy.data.frame(test_data, names = factor_variables)
+
+names(test_data) <- gsub('([[:punct:]])|\\s+','_',names(test_data))
+
+for(col_name in names(test_data))  {
+  cat(col_name,"\n")
+  eval(parse(text=paste("test_data$",col_name,"[is.na(test_data$",col_name,")]<-median(test_data$",col_name,", na.rm = TRUE)",sep="")))
+}
 # Cluster Trial -----------------------------------------------------------
 # FROM : https://www.r-bloggers.com/clustering-mixed-data-types-in-r/
 
@@ -179,7 +197,31 @@ ggplot(aes(x = X, y = Y), data = tsne_data) +
   geom_point(aes(color = cluster))
 
 
+#######################
 
+gower_dist <- daisy(train_data[, !names(train_data) %in% c('SalesPrice','Id')],metric = "gower",type = list(logratio = 3))
+gower_mat <- as.matrix(gower_dist)
+
+sil_width <- c(NA)
+for(i in 2:10){
+  pam_fit <- pam(gower_dist,diss = TRUE, k = i)
+  sil_width[i] <- pam_fit$silinfo$avg.width
+}
+plot(1:10, sil_width, xlab = "Number of clusters", ylab = "Silhouette Width")
+lines(1:10, sil_width)
+
+pam_fit <- pam(gower_dist, diss = TRUE, k = 5)
+pam_results <- train_data %>%
+  dplyr::select(-Id) %>%
+  mutate(cluster = pam_fit$clustering) %>%
+  group_by(cluster) %>%
+  do(the_summary = summary(.))
+pam_results <- train_data %>%
+  dplyr::select(SalePrice) %>%
+  mutate(cluster = pam_fit$clustering) %>%
+  group_by(cluster) %>%
+  do(the_summary = summary(.),the_mean = mean(.,na.rm=TRUE))
+pam_results$the_summary
 
 
 ################### missal
